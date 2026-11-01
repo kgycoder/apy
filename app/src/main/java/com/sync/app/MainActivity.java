@@ -275,6 +275,7 @@ public class MainActivity extends AppCompatActivity {
                 Log.w(TAG, "WebView renderer killed — reloading page. " +
                         "Native audio continues in MusicService.");
                 startNativeFallback(false);
+                setOrientation("portrait");   // 렌더러 재시작 시 NP 가로 상태가 풀리므로 세로로 복귀
                 try {
                     // The WebView is no longer usable; reload restores it
                     view.loadUrl(
@@ -396,7 +397,7 @@ public class MainActivity extends AppCompatActivity {
             hideSystemUI();
         } else {
             setRequestedOrientation(
-                    ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT);
+                    ActivityInfo.SCREEN_ORIENTATION_PORTRAIT);
             showSystemUI();
         }
     }
