@@ -1181,6 +1181,7 @@ async function loadRec(kw, rowId) {
    THUMBNAILS
 ════════════════════════════════════════════ */
 const getThumbHq = id => `https://i.ytimg.com/vi/${id}/maxresdefault.jpg`;
+const getThumb720 = id => `https://i.ytimg.com/vi/${id}/hq720.jpg`;   // 16:9, 레터박스 없음 (maxres 가 없는 영상용)
 const getThumbMd = id => `https://i.ytimg.com/vi/${id}/hqdefault.jpg`;
 const getThumbSd = id => `https://i.ytimg.com/vi/${id}/mqdefault.jpg`;
 
@@ -1201,9 +1202,14 @@ function trackThumbSrc(t) {
 function isYtThumbPlaceholder(img) {
     return img.naturalWidth === 120 && img.naturalHeight === 90;
 }
+/* 후보 순서: maxres(16:9) → hq720(16:9) → hqdefault(4:3, 검은 레터박스 포함 → 이후 크롭) → 마지막(mq/검색 썸네일).
+   현재 src 가 체인의 어디인지로 다음 후보를 정하므로(상태 플래그 없음) 어떤 화질로 시작한 <img> 에도 쓸 수 있고,
+   체인 밖 src 이거나 마지막이면 아무것도 하지 않아 무한 루프가 생기지 않는다. */
 function ytThumbNext(img, id, finalSrc) {
-    if (!img.dataset.f1) { img.dataset.f1 = '1'; img.src = getThumbMd(id); }
-    else if (!img.dataset.f2) { img.dataset.f2 = '1'; img.src = finalSrc || getThumbSd(id); }
+    const chain = [getThumbHq(id), getThumb720(id), getThumbMd(id), finalSrc || getThumbSd(id)]
+        .filter((u, i, a) => u && a.indexOf(u) === i);
+    const i = chain.indexOf(img.getAttribute('src'));
+    if (i >= 0 && i + 1 < chain.length) img.src = chain[i + 1];
 }
 function ytThumbCheck(img, id, finalSrc) {
     if (img.style.objectViewBox) img.style.objectViewBox = '';   // 이전 이미지에 적용했던 여백 크롭 초기화
@@ -1227,28 +1233,43 @@ function _cacheCrop(src, res) {
     _cropCache.set(src, res);
 }
 
-/* 여백 비율 계산. 여백이 없거나 판단 불가면 null */
+/* 여백 비율 계산. 여백이 없거나 판단 불가면 null
+   - 예전에는 "거의 순수한 검정(밝기<22)"만 여백으로 봤다. 어두운 회색(#1a1a1a~#222)·흰색 여백이나
+     JPEG 노이즈가 있는 검정은 놓쳐서 커버가 카드에 꽉 차지 않았다.
+   - 이제는 가장자리 한 줄의 평균색을 기준색으로 삼아, 그 색과 거의 같은(균일한) 줄이 이어지는 만큼을 여백으로 본다.
+     기준색이 어둡거나(<70) 밝을 때(>228)만 여백으로 인정해, 일반 커버 이미지가 잘리는 것을 막는다. */
 function _detectBars(probe) {
     const nw = probe.naturalWidth, nh = probe.naturalHeight;
     if (!nw || !nh || (nw === 120 && nh === 90)) return null;
-    const sw = 96, sh = Math.max(8, Math.round(sw * nh / nw));
+    const sw = 160, sh = Math.max(8, Math.round(sw * nh / nw));
     const sc = document.createElement('canvas'); sc.width = sw; sc.height = sh;
     const sx = sc.getContext('2d', { willReadFrequently: true });
     sx.drawImage(probe, 0, 0, sw, sh);
     const d = sx.getImageData(0, 0, sw, sh).data;
-    const dark = (x, y) => { const k = (y * sw + x) * 4; return (d[k] + d[k + 1] + d[k + 2]) / 3 < 22; };
-    const rowDark = y => { let n = 0; for (let x = 0; x < sw; x++) if (dark(x, y)) n++; return n / sw > 0.97; };
-    const colDark = x => { let n = 0; for (let y = 0; y < sh; y++) if (dark(x, y)) n++; return n / sh > 0.97; };
+    const TOL = 36;   // R+G+B 절대 차이 합 허용치
+    const near = (k, ref) => Math.abs(d[k] - ref[0]) + Math.abs(d[k + 1] - ref[1]) + Math.abs(d[k + 2] - ref[2]) <= TOL;
+    const rowAvg = y => { let r = 0, g = 0, b = 0; for (let x = 0; x < sw; x++) { const k = (y * sw + x) * 4; r += d[k]; g += d[k + 1]; b += d[k + 2]; } return [r / sw, g / sw, b / sw]; };
+    const colAvg = x => { let r = 0, g = 0, b = 0; for (let y = 0; y < sh; y++) { const k = (y * sw + x) * 4; r += d[k]; g += d[k + 1]; b += d[k + 2]; } return [r / sh, g / sh, b / sh]; };
+    const rowFlat = (y, ref) => { let n = 0; for (let x = 0; x < sw; x++) if (near((y * sw + x) * 4, ref)) n++; return n / sw > 0.96; };
+    const colFlat = (x, ref) => { let n = 0; for (let y = 0; y < sh; y++) if (near((y * sw + x) * 4, ref)) n++; return n / sh > 0.96; };
+    const okRef = ref => { const lum = (ref[0] + ref[1] + ref[2]) / 3; return lum < 70 || lum > 228; };
     const maxY = Math.floor(sh * 0.4), maxX = Math.floor(sw * 0.4);
-    let t = 0, b = 0, l = 0, r = 0;
-    while (t < maxY && rowDark(t)) t++;
-    while (b < maxY && rowDark(sh - 1 - b)) b++;
-    while (l < maxX && colDark(l)) l++;
-    while (r < maxX && colDark(sw - 1 - r)) r++;
+    // idx(i): 바깥쪽(0)에서 안쪽으로 i 번째 줄의 실제 좌표
+    const scan = (limit, idx, avg, flat) => {
+        const ref = avg(idx(0));
+        if (!okRef(ref)) return 0;
+        let n = 0;
+        while (n < limit && flat(idx(n), ref)) n++;
+        return n;
+    };
+    const t = scan(maxY, i => i, rowAvg, rowFlat);
+    const b = scan(maxY, i => sh - 1 - i, rowAvg, rowFlat);
+    const l = scan(maxX, i => i, colAvg, colFlat);
+    const r = scan(maxX, i => sw - 1 - i, colAvg, colFlat);
     if (t < 2 && b < 2 && l < 2 && r < 2) return null;            // 여백 없음
     if ((sw - l - r) < sw * 0.4 || (sh - t - b) < sh * 0.4) return null;
-    // 경계 행이 여백/내용 혼합이라 어둡지 않게 판정된 경우를 위해 안쪽으로 반 칸 더 자른다
-    const m = 0.5;
+    // 경계 행이 여백/내용 혼합이라 균일하지 않게 판정된 경우를 위해 안쪽으로 한 칸 가까이 더 자른다
+    const m = 0.75;
     return {
         t: t > 0 ? (t + m) / sh : 0, b: b > 0 ? (b + m) / sh : 0,
         l: l > 0 ? (l + m) / sw : 0, r: r > 0 ? (r + m) / sw : 0
@@ -1300,7 +1321,7 @@ function ytCropBars(img) {
     const src = img.currentSrc || img.src;
     if (!src || /^(data|blob):/.test(src) || !/^https?:/.test(src)) return;
     if (_OVB && img.id !== 'b-art' && _cropCache.has(src)) { _applyCrop(img, src, _cropCache.get(src)); return; }
-    if (_cropJobs.length > 200) _cropJobs.shift();       // 스크롤로 밀려난 오래된 요청은 버림
+    if (_cropJobs.length > 400) _cropJobs.shift();       // 스크롤로 밀려난 오래된 요청은 버림
     _cropJobs.push({ img, src });
     _cropNext();
 }
@@ -1676,7 +1697,7 @@ function applyTrackUi(t) {
     const bArt = document.getElementById('b-art');
     bArt.src = localThumb.startsWith('data:') ? localThumb : hq;
     bArt.onload = localThumb.startsWith('data:') ? null : () => ytThumbCheck(bArt, t.id, t.thumb || getThumbSd(t.id));
-    bArt.onerror = () => { bArt.src = md; bArt.onerror = () => { bArt.src = t.thumb || getThumbSd(t.id); }; };
+    bArt.onerror = () => ytThumbNext(bArt, t.id, t.thumb || getThumbSd(t.id));
     document.getElementById('b-title').textContent = t.title;
     document.getElementById('b-ch').textContent = t.channel || 'YouTube';
     updFavBtn();
@@ -1684,7 +1705,7 @@ function applyTrackUi(t) {
     const npArt = document.getElementById('np-art');
     npArt.src = localThumb.startsWith('data:') ? localThumb : hq;
     npArt.onload = localThumb.startsWith('data:') ? null : () => ytThumbCheck(npArt, t.id, t.thumb || getThumbSd(t.id));
-    npArt.onerror = () => { npArt.src = md; npArt.onerror = () => { npArt.src = t.thumb || getThumbSd(t.id); }; };
+    npArt.onerror = () => ytThumbNext(npArt, t.id, t.thumb || getThumbSd(t.id));
     document.getElementById('np-title').textContent = t.title;
     document.getElementById('np-ch').textContent = t.channel || 'YouTube';
     document.querySelectorAll('.card').forEach(c => {
@@ -2462,7 +2483,7 @@ function renderFavSide() {
     if (!S.favs.length) { el.innerHTML = '<div class="fi-empty">즐겨찾기 없음</div>'; return; }
     el.innerHTML = S.favs.map((f, i) => `
     <div class="fi" onclick="playFav(${i})">
-      <img class="fi-art" src="${esc(getThumbMd(f.id))}" onerror="this.src='${esc(f.thumb)}'" alt="">
+      <img class="fi-art" src="${esc(getThumbMd(f.id))}" onload="ytThumbCheck(this,'${esc(f.id)}','${esc(f.thumb || '')}')" onerror="ytThumbNext(this,'${esc(f.id)}','${esc(f.thumb || '')}')" alt="">
       <div class="fi-m"><div class="fi-t">${esc(f.title)}</div><div class="fi-c">${esc(f.channel)}</div></div>
     </div>`).join('');
 }
@@ -2494,7 +2515,7 @@ function renderQueue() {
     wrap.innerHTML = S.q.map((t, i) => `
     <div class="lcard${i === S.idx ? ' playing' : ''}" onclick="playIdx(${i})">
       <span class="lcard-n">${i + 1}</span>
-      <img class="lcard-art" src="${esc(getThumbMd(t.id))}" onerror="this.src='${esc(t.thumb)}'" alt="">
+      <img class="lcard-art" src="${esc(getThumbMd(t.id))}" onload="ytThumbCheck(this,'${esc(t.id)}','${esc(t.thumb || '')}')" onerror="ytThumbNext(this,'${esc(t.id)}','${esc(t.thumb || '')}')" alt="">
       <div class="lcard-m">
         <div class="lcard-t">${esc(t.title)}</div>
         <div class="lcard-c">${esc(t.channel)}</div>
@@ -2698,7 +2719,7 @@ function plRenderDetail(plId) {
         row.className = 'pl-track' + (S.track?.id === t.id ? ' playing' : '');
         row.innerHTML = `
       <span class="pl-track-num">${i + 1}</span>
-      <img class="pl-track-art" src="${esc(trackThumbSrc(t))}" onerror="this.src='${esc(t.thumb || getThumbMd(t.id))}'" alt="">
+      <img class="pl-track-art" src="${esc(trackThumbSrc(t))}" onload="ytThumbCheck(this,'${esc(t.id)}','${esc(t.thumb || '')}')" onerror="this.src='${esc(t.thumb || getThumbMd(t.id))}'" alt="">
       <div class="pl-track-m">
         <div class="pl-track-t">${esc(t.title)}</div>
         <div class="pl-track-c">${esc(t.channel)}</div>
@@ -2757,7 +2778,7 @@ async function plAddModalSearch(q, immediate = false) {
                 row.className = 'pl-modal-row pl-modal-row-in';
                 row.style.animationDelay = (i * 55) + 'ms'; // 순차적으로 부드럽게 이어지는 등장
                 row.innerHTML = `
-          <img class="pl-modal-row-art" src="${esc(getThumbMd(t.id))}" onerror="this.src='${esc(t.thumb)}'" alt="">
+          <img class="pl-modal-row-art" src="${esc(getThumbMd(t.id))}" onload="ytThumbCheck(this,'${esc(t.id)}','${esc(t.thumb || '')}')" onerror="ytThumbNext(this,'${esc(t.id)}','${esc(t.thumb || '')}')" alt="">
           <div class="pl-modal-row-m">
             <div class="pl-modal-row-t">${esc(t.title)}</div>
             <div class="pl-modal-row-c">${esc(t.channel)}</div>
