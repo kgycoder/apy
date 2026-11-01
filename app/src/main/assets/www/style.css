@@ -5483,3 +5483,11 @@ html.glass-native .c-dur {
 
 /* 배경 캔버스는 별도 합성 레이어로 고정해, 캔버스 갱신이 아래/위 DOM 의 다시 그리기를 유발하지 않게 한다. */
 /* (will-change 로 큰 캔버스를 별도 타일 레이어로 올리면 타일 경계가 격자 무늬로 보여 제거) */
+
+
+/* ── 성능: 가사 한 줄마다 will-change(color/opacity/filter)로 별도 GPU 레이어가 생겨
+       곡이 길수록(가사 줄이 많을수록) 메모리/합성 비용이 커지던 문제 제거. 전환(transition)은 그대로 동작한다. ── */
+.np-lyric-line,
+.np-ls-lyric-line {
+    will-change: auto !important;
+}
